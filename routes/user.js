@@ -5,6 +5,7 @@ const { z } = require('zod');
 const User = require('../models/user');
 const Batch = require('../models/batch');
 const authMiddleware = require('../middleware/auth');
+const Attendance = require('../models/attendance'); // Add this import
 const router = express.Router();
 
 
@@ -29,6 +30,12 @@ const profileSchema = z.object({
 
 const joinBatchSchema = z.object({
     batch_code: z.string().min(1, "Batch code is required")
+});
+
+const parentRegisterSchema = z.object({
+    name: z.string().min(1, "Name is required"),
+    email: z.string().email("Invalid email format"),
+    password: z.string().min(6, "Password must be at least 6 characters long")
 });
 
 router.post("/register", async (req, res) => {
@@ -644,6 +651,639 @@ router.get("/parent/batches/:batchId", async (req, res) => {
         res.status(500).json({
             success: false,
             message: "Error fetching batch details",
+            error: error.message
+        });
+    }
+});
+
+// Add this route after existing routes
+router.get("/student/batches/:batchId/attendance", async (req, res) => {
+    try {
+        const { batchId } = req.params;
+        const { userId } = req.query;
+        const { startDate, endDate } = req.query;
+        const authHeader = req.headers.authorization;
+
+        console.log('Fetching attendance:', { batchId, userId, startDate, endDate }); // Debug log
+
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({
+                success: false,
+                message: "Authentication required"
+            });
+        }
+
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Build query for attendance records
+        const query = {
+            batch_id: batchId
+        };
+
+        if (startDate && endDate) {
+            query.date = {
+                $gte: new Date(startDate),
+                $lte: new Date(endDate)
+            };
+        }
+
+        // Fetch all attendance records for the batch
+        const attendanceRecords = await Attendance.find(query)
+            .populate('marked_by', 'name')
+            .sort({ date: -1 });
+
+        // Filter and format records for the specific student
+        const formattedAttendance = attendanceRecords.map(record => {
+            const studentRecord = record.records.find(
+                r => r.student_id.toString() === userId
+            );
+            
+            return studentRecord ? {
+                date: record.date,
+                status: studentRecord.status,
+                remarks: studentRecord.remarks || '',
+                marked_by: record.marked_by.name
+            } : null;
+        }).filter(Boolean);
+
+        // Calculate statistics
+        const totalClasses = formattedAttendance.length;
+        const present = formattedAttendance.filter(record => record.status === 'present').length;
+        const absent = totalClasses - present;
+        const attendancePercentage = totalClasses > 0 ? (present / totalClasses) * 100 : 0;
+
+        res.json({
+            success: true,
+            attendance: {
+                records: formattedAttendance,
+                statistics: {
+                    totalClasses,
+                    present,
+                    absent,
+                    attendancePercentage: Math.round(attendancePercentage * 100) / 100
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error("Error fetching attendance:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching attendance records",
+            error: error.message
+        });
+    }
+});
+
+// Add this new route for parent to view student attendance
+router.get("/parent/batches/:batchId/student-attendance/:studentId", async (req, res) => {
+    try {
+        const { batchId, studentId } = req.params;
+        const { startDate, endDate } = req.query;
+        const authHeader = req.headers.authorization;
+
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({
+                success: false,
+                message: "Authentication required"
+            });
+        }
+
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Verify parent has access to this student
+        const parent = await User.findById(decoded.userId);
+        const student = await User.findById(studentId);
+
+        if (!parent || parent.role !== 'parent') {
+            return res.status(403).json({
+                success: false,
+                message: "Parent access required"
+            });
+        }
+
+        if (!student || student.parentEmail !== parent.email) {
+            return res.status(403).json({
+                success: false,
+                message: "Not authorized to view this student's attendance"
+            });
+        }
+
+        // Build query for attendance records
+        const query = {
+            batch_id: batchId,
+            'records.student_id': studentId
+        };
+
+        if (startDate && endDate) {
+            query.date = {
+                $gte: new Date(startDate),
+                $lte: new Date(endDate)
+            };
+        }
+
+        const attendanceRecords = await Attendance.find(query)
+            .populate('marked_by', 'name')
+            .sort({ date: -1 });
+
+        // Format the attendance records
+        const formattedRecords = attendanceRecords.map(record => {
+            const studentRecord = record.records.find(
+                r => r.student_id.toString() === studentId
+            );
+            return {
+                date: record.date,
+                status: studentRecord.status,
+                remarks: studentRecord.remarks || '',
+                marked_by: record.marked_by.name
+            };
+        });
+
+        // Calculate statistics
+        const totalClasses = formattedRecords.length;
+        const present = formattedRecords.filter(r => r.status === 'present').length;
+        const absent = totalClasses - present;
+        const attendancePercentage = totalClasses > 0 ? (present / totalClasses) * 100 : 0;
+
+        res.json({
+            success: true,
+            attendance: {
+                records: formattedRecords,
+                statistics: {
+                    totalClasses,
+                    present,
+                    absent,
+                    attendancePercentage: Math.round(attendancePercentage * 100) / 100
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error("Error fetching student attendance:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching attendance records",
+            error: error.message
+        });
+    }
+});
+
+// Get timetable for a batch (for students)
+router.get("/batches/:batchId/timetable", async (req, res) => {
+    try {
+        const { batchId } = req.params;
+        
+        // Find the batch
+        const batch = await Batch.findById(batchId);
+        if (!batch) {
+            return res.status(404).json({
+                success: false,
+                message: "Batch not found"
+            });
+        }
+        
+        // Return the timetable
+        return res.status(200).json({
+            success: true,
+            timetable: batch.timetable || {
+                monday: [],
+                tuesday: [],
+                wednesday: [],
+                thursday: [],
+                friday: [],
+                saturday: []
+            }
+        });
+    } catch (error) {
+        console.error("Error fetching timetable:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Error fetching timetable",
+            error: error.message
+        });
+    }
+});
+
+// Get timetable for a batch (for parents)
+router.get("/parent/batches/:batchId/timetable", async (req, res) => {
+    try {
+        const { batchId } = req.params;
+        const { studentId } = req.query;
+        
+        if (!studentId) {
+            return res.status(400).json({
+                success: false,
+                message: "Student ID is required"
+            });
+        }
+        
+        // Find the batch
+        const batch = await Batch.findById(batchId);
+        if (!batch) {
+            return res.status(404).json({
+                success: false,
+                message: "Batch not found"
+            });
+        }
+        
+        // Verify student is in this batch
+        const isStudentInBatch = batch.students.some(id => id.toString() === studentId);
+        if (!isStudentInBatch) {
+            return res.status(403).json({
+                success: false,
+                message: "Student is not enrolled in this batch"
+            });
+        }
+        
+        // Return the timetable
+        return res.status(200).json({
+            success: true,
+            timetable: batch.timetable || {
+                monday: [],
+                tuesday: [],
+                wednesday: [],
+                thursday: [],
+                friday: [],
+                saturday: []
+            }
+        });
+    } catch (error) {
+        console.error("Error fetching timetable:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Error fetching timetable",
+            error: error.message
+        });
+    }
+});
+
+// Get tests for a specific batch (student view)
+router.get('/student/batches/:batchId/tests', async (req, res) => {
+    try {
+        const { batchId } = req.params;
+        const authHeader = req.headers.authorization;
+
+        console.log('Auth header for student test results:', authHeader); // Debug log
+
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({
+                success: false,
+                message: "Authentication required"
+            });
+        }
+
+        const token = authHeader.split(' ')[1];
+        
+        // Verify the JWT token
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            console.log('Decoded student token:', decoded); // Debug log
+            
+            const studentId = decoded.userId;
+            const student = await User.findById(studentId);
+            
+            if (!student) {
+                return res.status(401).json({
+                    success: false,
+                    message: "Invalid student credentials"
+                });
+            }
+            
+            // Check if student is enrolled in the batch
+            const batch = await Batch.findById(batchId);
+            
+            if (!batch) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Batch not found"
+                });
+            }
+            
+            const isEnrolled = batch.students.some(
+                id => id.toString() === studentId
+            );
+            
+            if (!isEnrolled) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Student not enrolled in this batch"
+                });
+            }
+            
+            // Get a populated version of the batch
+            const populatedBatch = await Batch.findById(batchId)
+                .populate('testResults.createdBy', 'name email')
+                .populate('testResults.studentMarks.student', 'name email');
+            
+            // Return all tests for the batch
+            res.status(200).json({
+                success: true,
+                tests: populatedBatch.testResults || []
+            });
+        } catch (jwtError) {
+            console.error('JWT verification error:', jwtError);
+            return res.status(401).json({
+                success: false,
+                message: "Invalid authentication token"
+            });
+        }
+    } catch (error) {
+        console.error("Error fetching tests:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching tests",
+            error: error.message
+        });
+    }
+});
+
+// Get tests for a specific batch (parent view)
+router.get('/parent/batches/:batchId/tests', async (req, res) => {
+    try {
+        const { batchId } = req.params;
+        const { studentId } = req.query;
+        const authHeader = req.headers.authorization;
+
+        console.log('Auth header for parent test results:', authHeader); // Debug log
+        console.log('Request details:', { batchId, studentId }); // Debug log
+
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({
+                success: false,
+                message: "Authentication required"
+            });
+        }
+
+        if (!studentId) {
+            return res.status(400).json({
+                success: false,
+                message: "Student ID is required as a query parameter"
+            });
+        }
+
+        const token = authHeader.split(' ')[1];
+        
+        // Verify the JWT token
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            console.log('Decoded parent token:', decoded); // Debug log
+            
+            const parentId = decoded.userId;
+            const parent = await User.findById(parentId);
+            
+            if (!parent) {
+                return res.status(401).json({
+                    success: false,
+                    message: "Invalid parent credentials"
+                });
+            }
+            
+            // Check if the student exists and is related to the parent
+            const student = await User.findById(studentId);
+            if (!student) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Student not found"
+                });
+            }
+            
+            if (student.parentEmail !== parent.email) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Not authorized to view this student's information"
+                });
+            }
+            
+            // Check if student is enrolled in the batch
+            const batch = await Batch.findById(batchId);
+            
+            if (!batch) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Batch not found"
+                });
+            }
+            
+            const isEnrolled = batch.students.some(
+                id => id.toString() === studentId
+            );
+            
+            if (!isEnrolled) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Student not enrolled in this batch"
+                });
+            }
+            
+            // Get a populated version of the batch
+            const populatedBatch = await Batch.findById(batchId)
+                .populate('testResults.createdBy', 'name email')
+                .populate('testResults.studentMarks.student', 'name email');
+            
+            // Return all tests for the batch
+            res.status(200).json({
+                success: true,
+                tests: populatedBatch.testResults || []
+            });
+        } catch (jwtError) {
+            console.error('JWT verification error:', jwtError);
+            return res.status(401).json({
+                success: false,
+                message: "Invalid authentication token"
+            });
+        }
+    } catch (error) {
+        console.error("Error fetching tests:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching tests",
+            error: error.message
+        });
+    }
+});
+
+// Parent-only registration route
+router.post("/register/parent", async (req, res) => {
+    try {
+        const parsedData = parentRegisterSchema.parse(req.body);
+        const { name, email, password } = parsedData;
+        
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(409).json({ message: "Email already exists" });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, Number(process.env.SALT_ROUNDS));
+        
+        // Create parent account
+        const parent = await User.create({
+            name,
+            email,
+            password: hashedPassword,
+            role: 'parent'
+        });
+
+        const token = jwt.sign(
+            { userId: parent._id, email: parent.email, role: parent.role },
+            process.env.JWT_SECRET,
+            { expiresIn: "1h" }
+        );
+
+        res.status(201).json({
+            message: "Parent registration successful",
+            token,
+            user: { name: parent.name, email: parent.email, role: parent.role }
+        });
+    } catch (error) {
+        res.status(400).json({ message: error.errors || "Invalid input" });
+    }
+});
+
+// Get student's fees payment status for a batch
+router.get("/student/batches/:batchId/fees", async (req, res) => {
+    try {
+        const { batchId } = req.params;
+        const { userId } = req.query;
+        const authHeader = req.headers.authorization;
+
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({
+                success: false,
+                message: "Authentication required"
+            });
+        }
+
+        const token = authHeader.split(' ')[1];
+        
+        try {
+            // Verify the token
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+            // Check if the token contains userId that matches the request
+            if (decoded.userId !== userId) {
+                return res.status(403).json({
+                    success: false,
+                    message: "User ID mismatch"
+                });
+            }
+
+            // Find the batch with populated fields
+            const batch = await Batch.findById(batchId)
+                .populate('feesPayments.student', 'name email')
+                .lean();
+
+            if (!batch) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Batch not found"
+                });
+            }
+
+            // Check if student is enrolled
+            const isEnrolled = batch.students.some(
+                student => student.toString() === userId
+            );
+
+            if (!isEnrolled) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Student is not enrolled in this batch"
+                });
+            }
+
+            // Get fee payment for the student
+            const feesPayment = batch.feesPayments.find(
+                payment => payment.student._id.toString() === userId || payment.student.toString() === userId
+            ) || null;
+
+            res.json({
+                success: true,
+                feesPayment
+            });
+        } catch (error) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid token"
+            });
+        }
+    } catch (error) {
+        console.error("Error fetching fees payment:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching fees payment information",
+            error: error.message
+        });
+    }
+});
+
+// Get parent's child fees payment status for a batch
+router.get("/parent/batches/:batchId/fees", async (req, res) => {
+    try {
+        const { batchId } = req.params;
+        const { parentId, studentId } = req.query;
+        const authHeader = req.headers.authorization;
+
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({
+                success: false,
+                message: "Authentication required"
+            });
+        }
+
+        // Verify parent and student relationship
+        const parent = await User.findById(parentId);
+        const student = await User.findById(studentId);
+
+        if (!parent || parent.role !== 'parent') {
+            return res.status(403).json({
+                success: false,
+                message: "Parent access required"
+            });
+        }
+
+        if (!student || student.parentEmail !== parent.email) {
+            return res.status(403).json({
+                success: false,
+                message: "Invalid student access"
+            });
+        }
+
+        // Find and verify batch
+        const batch = await Batch.findById(batchId)
+            .populate('feesPayments.student', 'name email')
+            .lean();
+
+        if (!batch) {
+            return res.status(404).json({
+                success: false,
+                message: "Batch not found"
+            });
+        }
+
+        // Verify student enrollment
+        if (!batch.students.some(s => s.toString() === studentId)) {
+            return res.status(403).json({
+                success: false,
+                message: "Student not enrolled in this batch"
+            });
+        }
+
+        // Get fee payment for the student
+        const feesPayment = batch.feesPayments.find(
+            payment => payment.student._id.toString() === studentId || payment.student.toString() === studentId
+        ) || null;
+
+        res.json({
+            success: true,
+            feesPayment
+        });
+    } catch (error) {
+        console.error("Error fetching fees payment:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching fees payment information",
             error: error.message
         });
     }
