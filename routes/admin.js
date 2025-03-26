@@ -1953,8 +1953,7 @@ router.get("/batches/:batchId/fees", async (req, res) => {
         }
         
         const batch = await Batch.findById(batchId)
-            .populate('feesPayments.student', 'name email')
-            .populate('feesPayments.verifiedBy', 'name email');
+            .populate('feesPayments.student', 'name email');
         
         if (!batch) {
             return res.status(404).json({
@@ -1982,7 +1981,6 @@ router.post("/batches/:batchId/fees", async (req, res) => {
     try {
         const { batchId } = req.params;
         const { studentId, amount, paymentMethod, status, remarks } = req.body;
-        const authHeader = req.headers.authorization;
 
         // Validate batchId
         if (!batchId || !mongoose.Types.ObjectId.isValid(batchId)) {
@@ -2022,39 +2020,12 @@ router.post("/batches/:batchId/fees", async (req, res) => {
             });
         }
 
-        // Validate authentication
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({
-                success: false,
-                message: "Authentication required"
-            });
-        }
-
-        const token = authHeader.split(' ')[1];
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const teacher = await AdminUser.findById(decoded.id);
-        
-        if (!teacher) {
-            return res.status(401).json({
-                success: false,
-                message: "Invalid teacher credentials"
-            });
-        }
-
         // Find the batch
         const batch = await Batch.findById(batchId);
         if (!batch) {
             return res.status(404).json({
                 success: false,
                 message: "Batch not found"
-            });
-        }
-
-        // Verify teacher owns this batch
-        if (batch.teacher_id.toString() !== teacher._id.toString()) {
-            return res.status(403).json({
-                success: false,
-                message: "Unauthorized to modify fees for this batch"
             });
         }
 
@@ -2077,8 +2048,7 @@ router.post("/batches/:batchId/fees", async (req, res) => {
             paymentMethod,
             status,
             remarks: remarks || '',
-            paymentDate: new Date(),
-            verifiedBy: teacher._id
+            paymentDate: new Date()
         };
 
         if (existingPaymentIndex !== -1) {
@@ -2096,8 +2066,7 @@ router.post("/batches/:batchId/fees", async (req, res) => {
 
         // Fetch updated batch with populated fields
         const updatedBatch = await Batch.findById(batchId)
-            .populate('feesPayments.student', 'name email')
-            .populate('feesPayments.verifiedBy', 'name email');
+            .populate('feesPayments.student', 'name email');
 
         res.status(200).json({
             success: true,
@@ -2106,22 +2075,6 @@ router.post("/batches/:batchId/fees", async (req, res) => {
         });
     } catch (error) {
         console.error("Error updating fees payment:", error);
-        
-        // Handle specific error types
-        if (error.name === 'JsonWebTokenError') {
-            return res.status(401).json({
-                success: false,
-                message: "Invalid authentication token"
-            });
-        }
-        
-        if (error.name === 'TokenExpiredError') {
-            return res.status(401).json({
-                success: false,
-                message: "Authentication token expired"
-            });
-        }
-
         res.status(500).json({
             success: false,
             message: "Error updating fees payment record",

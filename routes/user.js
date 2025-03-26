@@ -6,13 +6,13 @@ const User = require('../models/user');
 const Batch = require('../models/batch');
 const authMiddleware = require('../middleware/auth');
 const Attendance = require('../models/attendance'); // Add this import
+const mongoose = require('mongoose');
 const router = express.Router();
 
 
 const registerSchema = z.object({
     name: z.string().min(1, "Name is required"),
     email: z.string().email("Invalid email format"),
-    parentEmail: z.string().email("Invalid parent email format"),
     password: z.string().min(6, "Password must be at least 6 characters long")
 });
 
@@ -35,20 +35,16 @@ const joinBatchSchema = z.object({
 const parentRegisterSchema = z.object({
     name: z.string().min(1, "Name is required"),
     email: z.string().email("Invalid email format"),
+    studentEmail: z.string().email("Invalid student email format"),
     password: z.string().min(6, "Password must be at least 6 characters long")
 });
 
 router.post("/register", async (req, res) => {
     try {
         const parsedData = registerSchema.parse(req.body);
-        const { name, email, parentEmail, password } = parsedData;
+        const { name, email, password } = parsedData;
         
-        const existingUser = await User.findOne({ 
-            $or: [
-                { email },
-                { email: parentEmail }
-            ]
-        });
+        const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(409).json({ message: "Email already exists" });
         }
@@ -59,17 +55,8 @@ router.post("/register", async (req, res) => {
         const user = await User.create({
             name,
             email,
-            parentEmail,
             password: hashedPassword,
             role: 'student'
-        });
-
-        // Create parent account with same password
-        await User.create({
-            name: `Parent of ${name}`,
-            email: parentEmail,
-            password: hashedPassword,
-            role: 'parent'
         });
 
         const token = jwt.sign(
@@ -79,26 +66,23 @@ router.post("/register", async (req, res) => {
         );
 
         res.status(201).json({
-            message: "Registration successful",
+            message: "Student registration successful",
             token,
-            user: { name: user.name, email: user.email, parentEmail: user.parentEmail, role: user.role }
+            user: { name: user.name, email: user.email, role: user.role }
         });
     } catch (error) {
         res.status(400).json({ message: error.errors || "Invalid input" });
     }
 });
 
-// Legacy login route (kept for backward compatibility)
+// Login route
 router.post("/login", async (req, res) => {
     try {
         const parsedData = loginSchema.parse(req.body);
         const { email, password } = parsedData;
-        const user = await User.findOne({
-            $or: [
-                { email: email },
-                { parentEmail: email }
-            ]
-        });
+        
+        // Find user by email
+        const user = await User.findOne({ email });
 
         if (!user) {
             return res.status(404).json({ message: "User not found" });
@@ -115,14 +99,28 @@ router.post("/login", async (req, res) => {
             { expiresIn: "1h" }
         );
 
-        res.json({
+        // If it's a parent, fetch the associated student information
+        let studentInfo = null;
+        if (user.role === 'parent') {
+            const student = await User.findOne({ parentEmail: user.email });
+            if (student) {
+                studentInfo = {
+                    id: student._id,
+                    name: student.name,
+                    email: student.email
+                };
+            }
+        }
+
+        res.status(200).json({
             message: "Login successful",
             token,
             user: { 
+                id: user._id,
                 name: user.name, 
                 email: user.email, 
-                parentEmail: user.parentEmail,
-                role: user.role
+                role: user.role,
+                studentInfo // Will be null for students and teachers
             }
         });
     } catch (error) {
@@ -1108,11 +1106,18 @@ router.get('/parent/batches/:batchId/tests', async (req, res) => {
 router.post("/register/parent", async (req, res) => {
     try {
         const parsedData = parentRegisterSchema.parse(req.body);
-        const { name, email, password } = parsedData;
+        const { name, email, studentEmail, password } = parsedData;
         
+        // Check if parent email already exists
         const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(409).json({ message: "Email already exists" });
+        }
+
+        // Check if student email exists
+        const student = await User.findOne({ email: studentEmail, role: 'student' });
+        if (!student) {
+            return res.status(404).json({ message: "Student email not found. Please register the student first." });
         }
 
         const hashedPassword = await bcrypt.hash(password, Number(process.env.SALT_ROUNDS));
@@ -1124,6 +1129,9 @@ router.post("/register/parent", async (req, res) => {
             password: hashedPassword,
             role: 'parent'
         });
+
+        // Update the student with parent email
+        await User.findByIdAndUpdate(student._id, { parentEmail: email });
 
         const token = jwt.sign(
             { userId: parent._id, email: parent.email, role: parent.role },
@@ -1146,68 +1154,54 @@ router.get("/student/batches/:batchId/fees", async (req, res) => {
     try {
         const { batchId } = req.params;
         const { userId } = req.query;
-        const authHeader = req.headers.authorization;
-
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({
-                success: false,
-                message: "Authentication required"
-            });
-        }
-
-        const token = authHeader.split(' ')[1];
         
-        try {
-            // Verify the token
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-            // Check if the token contains userId that matches the request
-            if (decoded.userId !== userId) {
-                return res.status(403).json({
-                    success: false,
-                    message: "User ID mismatch"
-                });
-            }
-
-            // Find the batch with populated fields
-            const batch = await Batch.findById(batchId)
-                .populate('feesPayments.student', 'name email')
-                .lean();
-
-            if (!batch) {
-                return res.status(404).json({
-                    success: false,
-                    message: "Batch not found"
-                });
-            }
-
-            // Check if student is enrolled
-            const isEnrolled = batch.students.some(
-                student => student.toString() === userId
-            );
-
-            if (!isEnrolled) {
-                return res.status(403).json({
-                    success: false,
-                    message: "Student is not enrolled in this batch"
-                });
-            }
-
-            // Get fee payment for the student
-            const feesPayment = batch.feesPayments.find(
-                payment => payment.student._id.toString() === userId || payment.student.toString() === userId
-            ) || null;
-
-            res.json({
-                success: true,
-                feesPayment
-            });
-        } catch (error) {
-            return res.status(401).json({
+        if (!batchId || !mongoose.Types.ObjectId.isValid(batchId)) {
+            return res.status(400).json({
                 success: false,
-                message: "Invalid token"
+                message: "Invalid batch ID"
             });
         }
+
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid user ID"
+            });
+        }
+
+        // Find the batch with populated fields
+        const batch = await Batch.findById(batchId)
+            .populate('feesPayments.student', 'name email')
+            .lean();
+
+        if (!batch) {
+            return res.status(404).json({
+                success: false,
+                message: "Batch not found"
+            });
+        }
+
+        // Check if student is enrolled
+        const isEnrolled = batch.students.some(
+            student => student.toString() === userId
+        );
+
+        if (!isEnrolled) {
+            return res.status(403).json({
+                success: false,
+                message: "Student is not enrolled in this batch"
+            });
+        }
+
+        // Get fee payment for the student
+        const feesPayment = batch.feesPayments.find(
+            payment => payment.student._id.toString() === userId || payment.student.toString() === userId
+        ) || null;
+
+        res.json({
+            success: true,
+            feesPayment
+        });
     } catch (error) {
         console.error("Error fetching fees payment:", error);
         res.status(500).json({
@@ -1223,12 +1217,18 @@ router.get("/parent/batches/:batchId/fees", async (req, res) => {
     try {
         const { batchId } = req.params;
         const { parentId, studentId } = req.query;
-        const authHeader = req.headers.authorization;
 
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({
+        if (!batchId || !mongoose.Types.ObjectId.isValid(batchId)) {
+            return res.status(400).json({
                 success: false,
-                message: "Authentication required"
+                message: "Invalid batch ID"
+            });
+        }
+
+        if (!studentId || !mongoose.Types.ObjectId.isValid(studentId)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid student ID"
             });
         }
 

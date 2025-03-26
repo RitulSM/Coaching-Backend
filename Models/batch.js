@@ -48,10 +48,6 @@ const BatchSchema = new mongoose.Schema({
             enum: ['paid', 'pending', 'overdue'],
             default: 'pending'
         },
-        verifiedBy: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: 'AdminUser'
-        },
         remarks: {
             type: String
         }
