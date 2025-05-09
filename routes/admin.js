@@ -2,11 +2,11 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { z } = require('zod');
-const AdminUser = require('../models/adminUser');
-const User = require('../models/user');
-const Batch = require('../models/batch');
-const Announcement = require('../models/announcement');
-const Attendance = require('../models/attendance');
+const AdminUser = require('../Models/adminUser');
+const User = require('../Models/user');
+const Batch = require('../Models/batch');
+const Announcement = require('../Models/announcement');
+const Attendance = require('../Models/attendance');
 const mongoose = require('mongoose');
 const router = express.Router();
 

@@ -2,10 +2,10 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { z } = require('zod');
-const User = require('../models/user');
-const Batch = require('../models/batch');
+const User = require('../Models/user');
+const Batch = require('../Models/batch');
 const authMiddleware = require('../middleware/auth');
-const Attendance = require('../models/attendance'); // Add this import
+const Attendance = require('../Models/attendance'); // Add this import
 const mongoose = require('mongoose');
 const router = express.Router();
 
